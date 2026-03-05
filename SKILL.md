@@ -330,14 +330,18 @@ const hash = await argon2.hash(password, { type: argon2.argon2id })
 // CORRECT — verify password:
 const valid = await argon2.verify(hash, password)
 
+// CORRECT — explicit runtime check before use:
+const jwtSecret = process.env.JWT_SECRET
+if (!jwtSecret) throw new Error('JWT_SECRET is not set')
+
 // CORRECT — JWT with expiry and explicit algorithm:
-const token = jwt.sign({ sub: userId }, process.env.JWT_SECRET!, {
+const token = jwt.sign({ sub: userId }, jwtSecret, {
   expiresIn: '1h',
   algorithm: 'HS256',  // never omit — prevents alg:none attack
 })
 
 // CORRECT — verify with explicit algorithm:
-const payload = jwt.verify(token, process.env.JWT_SECRET!, {
+const payload = jwt.verify(token, jwtSecret, {
   algorithms: ['HS256'],
 })
 ```
@@ -429,7 +433,7 @@ token = secrets.token_hex(32)  # cryptographically secure
 
 **Node.js / TypeScript:**
 ```typescript
-import { randomBytes, createCipheriv, createDecipheriv } from 'crypto'
+import { randomBytes, createCipheriv } from 'crypto'
 
 // CORRECT — cryptographically secure token:
 const token = randomBytes(32).toString('hex')
@@ -541,26 +545,38 @@ import { isIP } from 'net'
 import ipaddr from 'ipaddr.js'
 
 const BLOCKED_RANGES = [
-  '10.0.0.0/8',
-  '172.16.0.0/12',
-  '192.168.0.0/16',
-  '127.0.0.0/8',
-  '169.254.0.0/16',  // cloud metadata (AWS/GCP/Azure)
-  '::1/128',         // IPv6 loopback
-  'fc00::/7',        // IPv6 unique local
+  '0.0.0.0/8',          // "this" network
+  '10.0.0.0/8',         // RFC1918 private
+  '172.16.0.0/12',      // RFC1918 private
+  '192.168.0.0/16',     // RFC1918 private
+  '100.64.0.0/10',      // carrier-grade NAT
+  '127.0.0.0/8',        // IPv4 loopback
+  '169.254.0.0/16',     // link-local (cloud metadata endpoints)
+  '169.254.169.254/32', // AWS/GCP metadata IP
+  '::1/128',            // IPv6 loopback
+  'fc00::/7',           // IPv6 unique local
+  'fe80::/10',          // IPv6 link-local
 ]
 
-function isSsrfSafe(hostname: string): boolean {
-  if (!isIP(hostname)) return false  // only allow resolved IPs
-  const addr = ipaddr.parse(hostname)
+// Callers MUST DNS-resolve hostnames to IPs (A/AAAA) and call this
+// on each resolved address before making any outbound request.
+function isSsrfSafeIp(ip: string): boolean {
+  if (!isIP(ip)) return false  // reject hostnames and unparseable input
+  let addr = ipaddr.parse(ip)
+  // Normalize IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1) to pure IPv4
+  if (addr.kind() === 'ipv6') {
+    const v6 = addr as ipaddr.IPv6
+    if (v6.isIPv4MappedAddress()) addr = v6.toIPv4Address()
+  }
   return !BLOCKED_RANGES.some(range => {
     const [net, prefix] = ipaddr.parseCIDR(range)
     return addr.kind() === net.kind() && addr.match(net, Number(prefix))
   })
 }
 
-// Never fetch user-supplied URLs without this check:
-if (!isSsrfSafe(resolvedIp)) throw new Error('Blocked: private IP range')
+// Never fetch user-supplied URLs without DNS-resolving them first,
+// then checking every resolved IP:
+if (!isSsrfSafeIp(resolvedIp)) throw new Error('Blocked: private IP range')
 ```
 
 ---
@@ -904,7 +920,7 @@ audit for systems handling sensitive or regulated data.
 | SBD-23 Asset Inventory | A05 | — | ID.AM | A.8.1 | 1, 2 |
 | SBD-24 Incident Response | A09 | — | RS.AN | A.5.26 | 17 |
 | SBD-25 Privacy & Compliance | A02 | LLM02 | GV.OC-3 | A.5.34 | 3 |
-| SBD-26 Container & Infra | A05 | — | SP 800-190 | A.8.9 | 4, 16 |
+| SBD-26 Container & Infra | A05 | — | PR.PT-1 | A.8.9 | 4, 16 |
 
 ---
 
