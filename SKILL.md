@@ -217,7 +217,7 @@ TIER 1/2 rule: Flag the gap, continue with a clearly marked warning.
 
 ---
 
-## THE 25 SECUREBYDESIGN CONTROLS
+## THE 26 SECUREBYDESIGN CONTROLS
 
 ---
 
@@ -243,6 +243,25 @@ cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
 class UserInput(BaseModel):
     name: str = Field(max_length=100, pattern=r'^[a-zA-Z\s]+$')
     age: int = Field(ge=0, le=150)
+```
+
+**Node.js / TypeScript:**
+```typescript
+import { z } from 'zod'
+
+// NEVER:
+const query = `SELECT * FROM users WHERE id = ${userId}`
+
+// CORRECT — parameterized query:
+await db.query('SELECT * FROM users WHERE id = $1', [userId])
+
+// CORRECT — schema validation with Zod:
+const UserSchema = z.object({
+  name: z.string().max(100).regex(/^[a-zA-Z\s]+$/),
+  age: z.number().int().min(0).max(150),
+})
+
+const parsed = UserSchema.parse(req.body)  // throws on invalid input
 ```
 
 ---
@@ -297,6 +316,32 @@ Security theater check: Verify these are enforced at server/CDN level, not only 
 
 Always flag: `md5(password)` · `sha1(password)` · JWT with missing `exp` · no rate limiting on `/login`
 
+**Node.js / TypeScript:**
+```typescript
+import argon2 from 'argon2'
+import jwt from 'jsonwebtoken'
+
+// NEVER:
+// md5(password) or sha1(password)
+
+// CORRECT — hash password:
+const hash = await argon2.hash(password, { type: argon2.argon2id })
+
+// CORRECT — verify password:
+const valid = await argon2.verify(hash, password)
+
+// CORRECT — JWT with expiry and explicit algorithm:
+const token = jwt.sign({ sub: userId }, process.env.JWT_SECRET!, {
+  expiresIn: '1h',
+  algorithm: 'HS256',  // never omit — prevents alg:none attack
+})
+
+// CORRECT — verify with explicit algorithm:
+const payload = jwt.verify(token, process.env.JWT_SECRET!, {
+  algorithms: ['HS256'],
+})
+```
+
 ---
 
 #### SBD-05 · Authorization & Access Control
@@ -347,6 +392,27 @@ gitleaks protect --staged --config .gitleaks.toml
 
 Key patterns to scan: `sk-[a-zA-Z0-9]{48}` · `AKIA[0-9A-Z]{16}` · `ghp_[a-zA-Z0-9]{36}`
 
+**Node.js / TypeScript:**
+```typescript
+// NEVER — secrets in source code:
+// const apiKey = "sk-abc123..."
+
+// CORRECT — load from environment:
+import 'dotenv/config'
+const apiKey = process.env.SERVICE_API_KEY
+if (!apiKey) throw new Error('SERVICE_API_KEY is not set')
+
+// .env file — never commit to git
+// Add .env to .gitignore
+```
+
+```gitignore
+# .gitignore
+.env
+.env.local
+.env.*.local
+```
+
 ---
 
 #### SBD-08 · Cryptographic Standards
@@ -359,6 +425,26 @@ Never generate: DES · 3DES · RC4 · MD5 · SHA-1 for security · `Math.random(
 ```python
 import secrets
 token = secrets.token_hex(32)  # cryptographically secure
+```
+
+**Node.js / TypeScript:**
+```typescript
+import { randomBytes, createCipheriv, createDecipheriv } from 'crypto'
+
+// CORRECT — cryptographically secure token:
+const token = randomBytes(32).toString('hex')
+
+// CORRECT — AES-256-GCM encryption:
+const key = randomBytes(32)       // 256-bit key
+const iv  = randomBytes(12)       // 96-bit IV for GCM
+const cipher = createCipheriv('aes-256-gcm', key, iv)
+const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+const authTag = cipher.getAuthTag()
+
+// NEVER:
+// Math.random()            — not cryptographically secure
+// md5 / sha1 for hashing  — broken algorithms
+// DES / 3DES / RC4        — broken ciphers
 ```
 
 ---
@@ -410,6 +496,30 @@ response = client.messages.create(
 
 Auth endpoints: max 5/min per IP + per account.
 
+**Node.js / TypeScript:**
+```typescript
+import rateLimit from 'express-rate-limit'
+import Anthropic from '@anthropic-ai/sdk'
+
+// CORRECT — rate limit auth endpoints:
+export const loginLimiter = rateLimit({
+  windowMs: 60 * 1000,  // 1 minute
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many attempts, please try again later.' },
+})
+
+app.post('/api/login', loginLimiter, loginHandler)
+
+// CORRECT — hard cap on LLM token usage:
+const client = new Anthropic()
+const response = await client.messages.create({
+  model: 'claude-sonnet-4-6',
+  max_tokens: 1000,  // hard cap — never omit
+})
+```
+
 ---
 
 #### SBD-12 · SSRF Prevention
@@ -423,6 +533,34 @@ BLOCKED = [
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),  # cloud metadata
 ]
+```
+
+**Node.js / TypeScript:**
+```typescript
+import { isIP } from 'net'
+import ipaddr from 'ipaddr.js'
+
+const BLOCKED_RANGES = [
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  '127.0.0.0/8',
+  '169.254.0.0/16',  // cloud metadata (AWS/GCP/Azure)
+  '::1/128',         // IPv6 loopback
+  'fc00::/7',        // IPv6 unique local
+]
+
+function isSsrfSafe(hostname: string): boolean {
+  if (!isIP(hostname)) return false  // only allow resolved IPs
+  const addr = ipaddr.parse(hostname)
+  return !BLOCKED_RANGES.some(range => {
+    const [net, prefix] = ipaddr.parseCIDR(range)
+    return addr.kind() === net.kind() && addr.match(net, Number(prefix))
+  })
+}
+
+// Never fetch user-supplied URLs without this check:
+if (!isSsrfSafe(resolvedIp)) throw new Error('Blocked: private IP range')
 ```
 
 ---
@@ -439,6 +577,24 @@ except Exception as e:
 ```
 
 Never expose: stack traces, SQL queries, file paths, server versions, internal IPs.
+
+**Node.js / TypeScript:**
+```typescript
+import { Request, Response, NextFunction } from 'express'
+import logger from './logger'
+
+// CORRECT — Express global error handler (must be last middleware):
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+  logger.error({ err, path: req.path, method: req.method })  // detailed → log
+
+  // Generic message to client — never expose err.message or err.stack:
+  res.status(500).json({ error: 'Something went wrong' })
+})
+
+// NEVER:
+// res.status(500).json({ error: err.message, stack: err.stack })
+// console.error(err)  // use structured logger instead
+```
 
 ---
 
@@ -610,6 +766,79 @@ For West African markets:
 
 ---
 
+#### SBD-26 · Container & Infrastructure Security
+**Standards:** CIS Docker Benchmark · NIST SP 800-190 · OWASP A05 · ISO A.8.9 · CIS Control 4+16
+
+Never run containers as root. Use minimal base images. Scan before deploying.
+
+```dockerfile
+# NEVER — runs as root, bloated image, no pinned version:
+FROM node:latest
+COPY . .
+RUN npm install
+CMD ["node", "server.js"]
+
+# CORRECT — non-root user, minimal image, pinned digest:
+FROM node:20-alpine@sha256:<digest>
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production
+
+# Create non-root user:
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+
+COPY --chown=appuser:appgroup . .
+EXPOSE 3000
+CMD ["node", "server.js"]
+```
+
+Kubernetes — enforce security context and network isolation:
+```yaml
+# CORRECT — pod security context:
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 2000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      # Secrets from Secret object — never from ConfigMap:
+      env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: db-secret
+              key: password
+      # Resource limits — prevent noisy-neighbor DoS:
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "256Mi"
+        requests:
+          cpu: "100m"
+          memory: "128Mi"
+```
+
+CI/CD — scan images before pushing:
+```yaml
+- name: Scan image for vulnerabilities
+  run: |
+    trivy image --exit-code 1 --severity HIGH,CRITICAL myapp:${{ github.sha }}
+```
+
+Always flag: `FROM *:latest` · `USER root` · secrets in env vars via ConfigMap · no resource limits · `privileged: true` · `hostNetwork: true`
+
+---
+
 ## AUDIT REPORT TEMPLATE
 
 ```
@@ -623,7 +852,7 @@ Skill version: 1.1.0 — verify latest at https://github.com/securebydesign/skil
 ## Summary
 | Controls | Pass | Partial | Fail | N/A |
 |---|---|---|---|---|
-| 25 | X | X | X | X |
+| 26 | X | X | X | X |
 
 ## CRITICAL FINDINGS (Fail)
 [Control ID · Evidence · Risk · Remediation with code example in user's stack]
@@ -675,6 +904,7 @@ audit for systems handling sensitive or regulated data.
 | SBD-23 Asset Inventory | A05 | — | ID.AM | A.8.1 | 1, 2 |
 | SBD-24 Incident Response | A09 | — | RS.AN | A.5.26 | 17 |
 | SBD-25 Privacy & Compliance | A02 | LLM02 | GV.OC-3 | A.5.34 | 3 |
+| SBD-26 Container & Infra | A05 | — | SP 800-190 | A.8.9 | 4, 16 |
 
 ---
 
@@ -689,6 +919,8 @@ audit for systems handling sensitive or regulated data.
 **LLM:** user input in system prompt · LLM output to eval()/exec()/DB directly · no max_tokens · unrestricted agent tools
 
 **Infrastructure:** CORS * on auth endpoints · DEBUG=True in production · default credentials · IAM Action:*
+
+**Container:** `FROM *:latest` · `USER root` · secrets in ConfigMap · no resource limits · `privileged: true` · `hostNetwork: true`
 
 ---
 
